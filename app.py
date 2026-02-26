@@ -108,7 +108,7 @@ def _render_spans_table(spans: list[dict]) -> None:
 
     st.dataframe(
         df.style.map(color_status, subset=["Status"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -136,7 +136,7 @@ with tab_ask:
         key="question_input",
     )
 
-    run_clicked = st.button("Run Research", type="primary", use_container_width=False)
+    run_clicked = st.button("Run Research", type="primary", width="content")
 
     if run_clicked:
         if not question.strip():
@@ -271,7 +271,7 @@ with tab_dashboard:
                 })
             st.dataframe(
                 pd.DataFrame(lat_rows).set_index("Step"),
-                use_container_width=True,
+                width="stretch",
             )
 
         st.divider()
@@ -285,7 +285,7 @@ with tab_dashboard:
                 {"Step": name, "Total calls": v["total"], "Errors": v["errors"], "Error rate": f"{v['error_rate']*100:.1f}%"}
                 for name, v in failures.items()
             ]
-            st.dataframe(pd.DataFrame(rows).set_index("Step"), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows).set_index("Step"), width="stretch")
 
         st.divider()
 
@@ -310,7 +310,7 @@ with tab_dashboard:
             df["duration_s"] = (df["duration_ms"] / 1000).round(1)
             df["cost_usd"] = df["cost_usd"].round(4)
             df = df[["run_id", "query", "status", "duration_s", "n_sources", "n_rounds", "cost_usd", "started_at"]]
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — TRACES
