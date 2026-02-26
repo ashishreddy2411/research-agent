@@ -21,7 +21,10 @@ WHAT run_research() RETURNS:
   status=PARTIAL  → hit a hard stop; research done but synthesis skipped
   status=FAILED   → unexpected crash, no report
 
-  The Tracer records every step as a span and saves to logs/traces/{run_id}.json.
+PROGRESS CALLBACK:
+  Pass on_progress=callable to get live updates during the run.
+  Useful for streaming progress to a UI without threading.
+  The callback receives a plain string message at each meaningful step.
 
 USAGE:
   from agent.loop import run_research
@@ -30,6 +33,8 @@ USAGE:
   print(state.final_report)
   print(f"Sources: {state.total_sources}, Cost: ${state.estimated_cost_usd:.4f}")
 """
+
+from typing import Callable
 
 from agent.state import ResearchState, ResearchStatus
 from agent.planner import Planner
@@ -41,14 +46,17 @@ from llm.client import LLMClient
 from config import settings
 
 
-def run_research(query: str) -> ResearchState:
+def run_research(
+    query: str,
+    on_progress: Callable[[str], None] | None = None,
+) -> ResearchState:
     """
     Execute the full research pipeline for a query.
 
-    Runs Planner → Researcher → Reflector loop until a stopping condition
-    is met, then calls Synthesizer to produce the final report.
-
-    Every step is recorded as a span in a Tracer and saved to disk.
+    Args:
+        query:       The research question.
+        on_progress: Optional callback called with a status string at each
+                     meaningful step. Use this to stream progress to a UI.
 
     Never raises. All exceptions are caught and recorded in state.errors.
     """
@@ -61,24 +69,31 @@ def run_research(query: str) -> ResearchState:
     reflector = Reflector(client=client)
     synthesizer = Synthesizer(client=client)
 
+    def _progress(msg: str) -> None:
+        _log(msg)
+        if on_progress:
+            on_progress(msg)
+
     try:
-        _run_loop(state, planner, researcher, reflector, tracer)
+        _run_loop(state, planner, researcher, reflector, tracer, client, _progress)
 
         # Only synthesize if research didn't hit a hard stop
         if state.status == ResearchStatus.RUNNING:
-            _log("Synthesizing report...")
+            _progress(f"Synthesizing report from {state.total_sources} sources...")
             with tracer.span("synthesizer") as span:
                 synthesizer.synthesize(state)
+                client.update_state_cost(state)
                 span.metadata["n_sources"] = len(state.sources)
                 span.metadata["report_chars"] = len(state.final_report)
                 span.metadata["n_sections"] = len(state.outline)
-            _log(f"Synthesis complete. Report: {len(state.final_report)} chars")
+            _progress(f"Report complete — {len(state.final_report)} chars")
 
     except Exception as e:
         state.errors.append(f"Unexpected error in research loop: {type(e).__name__}: {e}")
         state.record_failure(f"Unexpected error: {type(e).__name__}")
 
     finally:
+        client.update_state_cost(state)
         tracer.finish(state)
         path = tracer.save()
         _log(f"Trace saved → {path}")
@@ -92,29 +107,30 @@ def _run_loop(
     researcher: Researcher,
     reflector: Reflector,
     tracer: Tracer,
+    client: LLMClient,
+    progress: Callable[[str], None],
 ) -> None:
-    """
-    The actual loop logic. Modifies state in place.
+    """The actual loop logic. Modifies state in place."""
 
-    Separated from run_research() so the outer function can catch any
-    exception that leaks out and record it properly.
-    """
     # ── Step 1: Plan ──────────────────────────────────────────────────────────
+    progress("Planning: breaking your question into search angles...")
     with tracer.span("planner") as span:
         planner.plan(state)
+        client.update_state_cost(state)
         span.metadata["subqueries"] = state.subqueries
         span.metadata["n_subqueries"] = len(state.subqueries)
-    _log(f"Planned {len(state.subqueries)} subqueries: {state.subqueries}")
+    progress(f"Planning complete — {len(state.subqueries)} search angles")
 
     # ── Step 2+: Research rounds ──────────────────────────────────────────────
     current_queries = state.subqueries.copy()
 
     for round_num in range(1, settings.max_research_rounds + 1):
 
-        _log(f"Round {round_num}: researching {len(current_queries)} queries")
+        progress(f"Round {round_num} of {settings.max_research_rounds}")
 
         for subquery in current_queries:
-            # Cost cap check — before each search call
+            # Cost cap check — always use live cost from client
+            client.update_state_cost(state)
             if state.estimated_cost_usd >= settings.max_cost_usd:
                 state.errors.append(
                     f"Cost cap ${settings.max_cost_usd} reached in round {round_num}"
@@ -128,37 +144,40 @@ def _run_loop(
 
             # Source cap check
             if state.total_sources >= settings.max_sources_per_run:
-                _log(f"Source cap {settings.max_sources_per_run} reached")
+                progress(f"Source cap {settings.max_sources_per_run} reached")
                 break
 
+            progress(f"Searching: {subquery[:70]}...")
             with tracer.span("researcher") as span:
                 span.metadata["subquery"] = subquery
                 span.metadata["round"] = round_num
                 new_count = researcher.research_into_state(subquery, state, round_num)
+                client.update_state_cost(state)
                 span.metadata["n_new_sources"] = new_count
                 span.metadata["total_sources"] = state.total_sources
-            _log(f"  '{subquery[:60]}' → {new_count} new summaries")
+            progress(f"Found {new_count} new sources — {state.total_sources} total")
 
         state.rounds_completed = round_num
-        _log(f"Round {round_num} complete. Total sources: {state.total_sources}")
 
         # ── Step 3: Reflect ────────────────────────────────────────────────────
         if round_num >= settings.max_research_rounds:
-            _log("Max rounds reached — stopping research loop")
+            progress("Max rounds reached — moving to synthesis")
             break
 
+        progress(f"Evaluating coverage across {state.total_sources} sources...")
         with tracer.span("reflector") as span:
             span.metadata["round"] = round_num
             reflection = reflector.reflect_on_state(state)
+            client.update_state_cost(state)
             span.metadata["has_gap"] = reflection.has_gap
             span.metadata["gap_description"] = reflection.gap_description
             span.metadata["follow_up_query"] = reflection.follow_up_query or ""
 
         if not reflection.has_gap:
-            _log(f"Reflector: no gaps found. Reason: {reflection.gap_description}")
+            progress(f"Coverage complete — {reflection.gap_description}")
             break
 
-        _log(f"Reflector: gap found — '{reflection.follow_up_query}'")
+        progress(f"Gap found: {reflection.follow_up_query[:70]}...")
         current_queries = [reflection.follow_up_query]
 
     _log(
