@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 # Ensure project root is on the path when running directly
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from tools.search import search
 from tools.fetch import fetch_page
