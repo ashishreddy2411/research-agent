@@ -145,9 +145,29 @@ with tab_ask:
             # Clear previous result
             st.session_state.pop("last_result", None)
 
-            with st.spinner("Researching... this takes a minute or two."):
-                state = run_research(question.strip())
+            with st.status("Researching...", expanded=True) as status:
+                log_el = st.empty()
+                lines: list[str] = []
+
+                def on_progress(msg: str) -> None:
+                    lines.append(msg)
+                    log_el.markdown(
+                        "\n".join(f"- {m}" for m in lines[-10:])
+                    )
+
+                state = run_research(question.strip(), on_progress=on_progress)
                 st.session_state["last_result"] = state
+
+                label = (
+                    f"Done — {state.total_sources} sources, "
+                    f"{state.rounds_completed} round(s), "
+                    f"${state.estimated_cost_usd:.4f}"
+                )
+                status.update(
+                    label=label,
+                    state="complete" if state.status == ResearchStatus.SUCCESS else "error",
+                    expanded=False,
+                )
 
     # ── Display result ────────────────────────────────────────────────────────
 

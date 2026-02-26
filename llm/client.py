@@ -91,6 +91,11 @@ class LLMClient:
         self._cheap_model = settings.cheap_model
         self._embedding_model = settings.embedding_model
 
+        # Cumulative token + cost tracking across all calls
+        self._total_input_tokens: int = 0
+        self._total_output_tokens: int = 0
+        self._total_cost_usd: float = 0.0
+
     # ── Smart model — Responses API ────────────────────────────────────────────
 
     def generate(
@@ -120,7 +125,9 @@ class LLMClient:
         if previous_response_id is not None:
             kwargs["previous_response_id"] = previous_response_id
 
-        return self._client.responses.create(**kwargs)
+        response = self._client.responses.create(**kwargs)
+        self._track_usage(response.usage, "smart")
+        return response
 
     async def generate_async(
         self,
@@ -164,6 +171,7 @@ class LLMClient:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=settings.max_summary_tokens,
         )
+        self._track_usage(response.usage, "cheap")
         return response.choices[0].message.content or ""
 
     async def generate_cheap_async(self, prompt: str) -> str:
@@ -174,6 +182,41 @@ class LLMClient:
             max_tokens=settings.max_summary_tokens,
         )
         return response.choices[0].message.content or ""
+
+    # ── Cost tracking ──────────────────────────────────────────────────────────
+
+    def _track_usage(self, usage, model_type: str) -> None:
+        """Extract token counts from an API response usage object and accumulate cost."""
+        try:
+            if model_type == "smart":
+                inp = getattr(usage, "input_tokens", 0) or 0
+                out = getattr(usage, "output_tokens", 0) or 0
+                cost = (
+                    inp / 1000 * settings.smart_input_cost_per_1k
+                    + out / 1000 * settings.smart_output_cost_per_1k
+                )
+            else:  # cheap
+                inp = getattr(usage, "prompt_tokens", 0) or 0
+                out = getattr(usage, "completion_tokens", 0) or 0
+                cost = (
+                    inp / 1000 * settings.cheap_input_cost_per_1k
+                    + out / 1000 * settings.cheap_output_cost_per_1k
+                )
+            self._total_input_tokens += inp
+            self._total_output_tokens += out
+            self._total_cost_usd += cost
+        except Exception:
+            pass  # never let tracking break the main flow
+
+    def update_state_cost(self, state) -> None:
+        """
+        Write accumulated token + cost totals into a ResearchState.
+
+        Call this after each pipeline step so cost cap checks see live data.
+        """
+        state.total_input_tokens = self._total_input_tokens
+        state.total_output_tokens = self._total_output_tokens
+        state.estimated_cost_usd = self._total_cost_usd
 
     # ── Embedding model — Embeddings API ───────────────────────────────────────
 
