@@ -1,0 +1,32 @@
+[project]
+name = "research-agent"
+version = "0.1.0"
+description = "Production Deep Research Agent — learning project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.24.0",
+    "azure-ai-projects>=2.0.0b4",
+    "azure-identity>=1.19.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.27.0",           # sync HTTP — Tavily API, Jina Reader
+    "aiohttp>=3.10.0",         # async HTTP — parallel URL fetching (Phase 5)
+    "trafilatura>=1.12.0",     # content extraction — strips nav/ads/boilerplate
+    "streamlit>=1.44.0",       # web UI (Phase 5)
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.4.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
