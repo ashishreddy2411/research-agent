@@ -89,8 +89,13 @@ class Researcher:
         if not results:
             return []
 
-        # Step 2: Filter out already-visited URLs
-        new_results = [r for r in results if r.url not in visited_urls]
+        # Step 2: Filter out already-visited URLs + deduplicate within this batch
+        seen_in_batch: set[str] = set()
+        new_results = []
+        for r in results:
+            if r.url not in visited_urls and r.url not in seen_in_batch:
+                seen_in_batch.add(r.url)
+                new_results.append(r)
         if not new_results:
             return []
 

@@ -38,6 +38,7 @@ import re
 
 from llm.client import LLMClient
 from agent.state import ResearchState
+from agent.guardrails import deduplicate_queries
 from prompts.planner import DECOMPOSE_PROMPT
 
 
@@ -83,7 +84,7 @@ class Planner:
             queries = _parse_queries(text)
 
             if queries:
-                return queries
+                return deduplicate_queries(queries)
 
         except Exception:
             pass  # fall through to fallback

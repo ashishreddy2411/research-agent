@@ -41,6 +41,7 @@ from agent.planner import Planner
 from agent.researcher import Researcher
 from agent.reflector import Reflector
 from agent.synthesizer import Synthesizer
+from agent.guardrails import validate_query
 from observability.tracer import Tracer
 from llm.client import LLMClient
 from config import settings
@@ -60,14 +61,17 @@ def run_research(
 
     Never raises. All exceptions are caught and recorded in state.errors.
     """
+    try:
+        query = validate_query(query)
+    except Exception as e:
+        state = ResearchState(query=str(query) if query else "")
+        state.errors.append(str(e))
+        state.record_failure(f"Invalid query: {e}")
+        return state
+
     state = ResearchState(query=query)
     client = LLMClient()
     tracer = Tracer(query=query)
-
-    planner = Planner(client=client)
-    researcher = Researcher(client=client)
-    reflector = Reflector(client=client)
-    synthesizer = Synthesizer(client=client)
 
     def _progress(msg: str) -> None:
         _log(msg)
@@ -75,6 +79,11 @@ def run_research(
             on_progress(msg)
 
     try:
+        planner = Planner(client=client)
+        researcher = Researcher(client=client)
+        reflector = Reflector(client=client)
+        synthesizer = Synthesizer(client=client)
+
         _run_loop(state, planner, researcher, reflector, tracer, client, _progress)
 
         # Only synthesize if research didn't hit a hard stop
@@ -177,8 +186,9 @@ def _run_loop(
             progress(f"Coverage complete — {reflection.gap_description}")
             break
 
-        progress(f"Gap found: {reflection.follow_up_query[:70]}...")
-        current_queries = [reflection.follow_up_query]
+        follow_up = reflection.follow_up_query or ""
+        progress(f"Gap found: {follow_up[:70]}...")
+        current_queries = [follow_up] if follow_up else state.subqueries[:1]
 
     _log(
         f"Research complete. "

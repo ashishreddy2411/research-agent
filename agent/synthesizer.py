@@ -44,6 +44,7 @@ import json
 import re
 
 from agent.state import ResearchState, ResearchStatus
+from agent.guardrails import check_citation_bounds
 from llm.client import LLMClient
 from config import settings
 from prompts.synthesizer import OUTLINE_PROMPT, REPORT_PROMPT
@@ -94,6 +95,14 @@ class Synthesizer:
         # Append references — title + URL so every claim is traceable
         references = _build_references(summaries)
         final_report = report_body.strip() + "\n\n" + references
+
+        # Citation bounds check — warn if model hallucinated out-of-range refs
+        bad_citations = check_citation_bounds(final_report, len(sources))
+        if bad_citations:
+            state.errors.append(
+                f"Out-of-bounds citations in report: {bad_citations} "
+                f"(only {len(sources)} sources available)"
+            )
 
         state.record_success(report=final_report, sources=sources)
 
