@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.python-version
+uv.lock
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Env — NEVER commit secrets
+.env
+
+# Generated output — not source
+logs/
+evals/reports/
+data/cache.db
+
+# IDE
+.vscode/
+.idea/
+
+# Project planning notes — not part of the codebase
+progress.md
+Instructions.md
