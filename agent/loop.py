@@ -21,6 +21,8 @@ WHAT run_research() RETURNS:
   status=PARTIAL  → hit a hard stop; research done but synthesis skipped
   status=FAILED   → unexpected crash, no report
 
+  The Tracer records every step as a span and saves to logs/traces/{run_id}.json.
+
 USAGE:
   from agent.loop import run_research
   state = run_research("What are the latest advances in solid-state batteries?")
@@ -34,6 +36,7 @@ from agent.planner import Planner
 from agent.researcher import Researcher
 from agent.reflector import Reflector
 from agent.synthesizer import Synthesizer
+from observability.tracer import Tracer
 from llm.client import LLMClient
 from config import settings
 
@@ -45,32 +48,40 @@ def run_research(query: str) -> ResearchState:
     Runs Planner → Researcher → Reflector loop until a stopping condition
     is met, then calls Synthesizer to produce the final report.
 
-    Returns ResearchState with:
-      status=SUCCESS  → final_report, sources, outline all populated
-      status=PARTIAL  → hit cost/round/source cap before synthesis
-      status=FAILED   → unexpected crash, no report
+    Every step is recorded as a span in a Tracer and saved to disk.
 
     Never raises. All exceptions are caught and recorded in state.errors.
     """
     state = ResearchState(query=query)
     client = LLMClient()
+    tracer = Tracer(query=query)
+
     planner = Planner(client=client)
     researcher = Researcher(client=client)
     reflector = Reflector(client=client)
     synthesizer = Synthesizer(client=client)
 
     try:
-        _run_loop(state, planner, researcher, reflector)
+        _run_loop(state, planner, researcher, reflector, tracer)
 
         # Only synthesize if research didn't hit a hard stop
         if state.status == ResearchStatus.RUNNING:
             _log("Synthesizing report...")
-            synthesizer.synthesize(state)
+            with tracer.span("synthesizer") as span:
+                synthesizer.synthesize(state)
+                span.metadata["n_sources"] = len(state.sources)
+                span.metadata["report_chars"] = len(state.final_report)
+                span.metadata["n_sections"] = len(state.outline)
             _log(f"Synthesis complete. Report: {len(state.final_report)} chars")
 
     except Exception as e:
         state.errors.append(f"Unexpected error in research loop: {type(e).__name__}: {e}")
         state.record_failure(f"Unexpected error: {type(e).__name__}")
+
+    finally:
+        tracer.finish(state)
+        path = tracer.save()
+        _log(f"Trace saved → {path}")
 
     return state
 
@@ -80,6 +91,7 @@ def _run_loop(
     planner: Planner,
     researcher: Researcher,
     reflector: Reflector,
+    tracer: Tracer,
 ) -> None:
     """
     The actual loop logic. Modifies state in place.
@@ -88,19 +100,19 @@ def _run_loop(
     exception that leaks out and record it properly.
     """
     # ── Step 1: Plan ──────────────────────────────────────────────────────────
-    planner.plan(state)
+    with tracer.span("planner") as span:
+        planner.plan(state)
+        span.metadata["subqueries"] = state.subqueries
+        span.metadata["n_subqueries"] = len(state.subqueries)
     _log(f"Planned {len(state.subqueries)} subqueries: {state.subqueries}")
 
     # ── Step 2+: Research rounds ──────────────────────────────────────────────
-    # Round 1: research all subqueries from the planner
-    # Round 2+: research the follow-up query from the reflector
     current_queries = state.subqueries.copy()
 
     for round_num in range(1, settings.max_research_rounds + 1):
 
         _log(f"Round {round_num}: researching {len(current_queries)} queries")
 
-        # Research each query in this round
         for subquery in current_queries:
             # Cost cap check — before each search call
             if state.estimated_cost_usd >= settings.max_cost_usd:
@@ -119,7 +131,12 @@ def _run_loop(
                 _log(f"Source cap {settings.max_sources_per_run} reached")
                 break
 
-            new_count = researcher.research_into_state(subquery, state, round_num)
+            with tracer.span("researcher") as span:
+                span.metadata["subquery"] = subquery
+                span.metadata["round"] = round_num
+                new_count = researcher.research_into_state(subquery, state, round_num)
+                span.metadata["n_new_sources"] = new_count
+                span.metadata["total_sources"] = state.total_sources
             _log(f"  '{subquery[:60]}' → {new_count} new summaries")
 
         state.rounds_completed = round_num
@@ -130,7 +147,12 @@ def _run_loop(
             _log("Max rounds reached — stopping research loop")
             break
 
-        reflection = reflector.reflect_on_state(state)
+        with tracer.span("reflector") as span:
+            span.metadata["round"] = round_num
+            reflection = reflector.reflect_on_state(state)
+            span.metadata["has_gap"] = reflection.has_gap
+            span.metadata["gap_description"] = reflection.gap_description
+            span.metadata["follow_up_query"] = reflection.follow_up_query or ""
 
         if not reflection.has_gap:
             _log(f"Reflector: no gaps found. Reason: {reflection.gap_description}")
@@ -139,7 +161,6 @@ def _run_loop(
         _log(f"Reflector: gap found — '{reflection.follow_up_query}'")
         current_queries = [reflection.follow_up_query]
 
-    # Research loop complete. Synthesis happens in Phase 3.
     _log(
         f"Research complete. "
         f"Rounds: {state.rounds_completed}, "
@@ -149,5 +170,4 @@ def _run_loop(
 
 
 def _log(message: str) -> None:
-    """Simple structured log. Phase 4 replaces this with Trace/Span."""
     print(f"[research-loop] {message}")
