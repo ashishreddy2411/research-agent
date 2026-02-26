@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import settings
+from agent.guardrails import is_safe_url
 
 
 # ── Result type ────────────────────────────────────────────────────────────────
@@ -115,6 +116,10 @@ def fetch_page(url: str) -> FetchResult:
     Returns:
         FetchResult with clean text content, or success=False if both tiers fail.
     """
+    # Safety check before any network call
+    if not is_safe_url(url):
+        return _failed(url, f"Blocked URL: must be http/https and not a private/internal host")
+
     # Tier 1: Jina Reader
     result = _fetch_via_jina(url)
     if result.success:

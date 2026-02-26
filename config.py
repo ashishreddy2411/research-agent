@@ -39,6 +39,7 @@ USAGE:
   print(settings.max_cost_usd)    # 2.0
 """
 
+from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -95,7 +96,7 @@ class Settings(BaseSettings):
         le=20,
         description="URLs to retrieve per search query (1 Tavily credit per call)",
     )
-    search_depth: str = Field(
+    search_depth: Literal["basic", "advanced"] = Field(
         default="basic",
         description="'basic' = 1 credit, full content. 'advanced' = 2 credits, deeper extraction.",
     )
