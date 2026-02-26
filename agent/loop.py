@@ -1,66 +1,54 @@
 """
-agent/loop.py — The research pipeline: orchestrates Planner → Researcher → Reflector.
+agent/loop.py — Full research pipeline: Planner → Researcher → Reflector → Synthesizer.
 
-THE CORE CONCEPT:
-  This file wires the components together into a running pipeline.
-  It owns the loop logic, the stopping conditions, and the cost cap enforcement.
-  Individual components (Planner, Researcher, Reflector) don't know about
-  each other. The loop connects them through ResearchState.
-
-THE LOOP:
+THE PIPELINE:
 
   1. Planner decomposes the query into subqueries
   2. For each subquery: Researcher searches and summarizes
   3. Reflector evaluates coverage and either:
        a. Finds a gap → generate follow-up query → go to step 2 (new round)
-       b. No gap → stop and synthesize (Phase 3)
-  4. Stopping conditions (hard stops that override the reflector):
+       b. No gap → proceed to synthesis
+  4. Synthesizer turns page summaries into a final Markdown report with citations
+  5. Stopping conditions (hard stops that override the reflector):
        - max_research_rounds reached
        - max_sources_per_run reached
        - cost cap exceeded
        - any unexpected exception
 
-  Phase 2 produces a ResearchState with page_summaries filled in.
-  Phase 3 (next phase) adds the Synthesizer to turn those summaries into a report.
-  For now: run_research() returns the state with summaries — the raw material.
-
 WHAT run_research() RETURNS:
   Always returns a ResearchState, never raises.
-  status=RUNNING if synthesis hasn't happened yet (Phase 2 ends here)
-  status=PARTIAL if a hard stop was hit during research
-  status=FAILED only if an unexpected crash occurred
-
-  This matches the production contract: every code path returns something.
+  status=SUCCESS  → final_report, sources, outline all populated
+  status=PARTIAL  → hit a hard stop; research done but synthesis skipped
+  status=FAILED   → unexpected crash, no report
 
 USAGE:
   from agent.loop import run_research
   state = run_research("What are the latest advances in solid-state batteries?")
-  print(f"Rounds: {state.rounds_completed}")
-  print(f"Sources: {state.total_sources}")
-  print(f"Cost: ${state.estimated_cost_usd:.4f}")
-  for s in state.page_summaries[:3]:
-      print(s.url)
-      print(s.summary[:200])
+  print(state.status)
+  print(state.final_report)
+  print(f"Sources: {state.total_sources}, Cost: ${state.estimated_cost_usd:.4f}")
 """
 
 from agent.state import ResearchState, ResearchStatus
 from agent.planner import Planner
 from agent.researcher import Researcher
 from agent.reflector import Reflector
+from agent.synthesizer import Synthesizer
 from llm.client import LLMClient
 from config import settings
 
 
 def run_research(query: str) -> ResearchState:
     """
-    Execute the full research loop for a query.
+    Execute the full research pipeline for a query.
 
     Runs Planner → Researcher → Reflector loop until a stopping condition
-    is met. Returns ResearchState with page_summaries populated.
+    is met, then calls Synthesizer to produce the final report.
 
-    Phase 3 will extend this to call the Synthesizer and produce a report.
-    For now, the state is returned with status=RUNNING (research done,
-    synthesis not yet implemented).
+    Returns ResearchState with:
+      status=SUCCESS  → final_report, sources, outline all populated
+      status=PARTIAL  → hit cost/round/source cap before synthesis
+      status=FAILED   → unexpected crash, no report
 
     Never raises. All exceptions are caught and recorded in state.errors.
     """
@@ -69,9 +57,17 @@ def run_research(query: str) -> ResearchState:
     planner = Planner(client=client)
     researcher = Researcher(client=client)
     reflector = Reflector(client=client)
+    synthesizer = Synthesizer(client=client)
 
     try:
         _run_loop(state, planner, researcher, reflector)
+
+        # Only synthesize if research didn't hit a hard stop
+        if state.status == ResearchStatus.RUNNING:
+            _log("Synthesizing report...")
+            synthesizer.synthesize(state)
+            _log(f"Synthesis complete. Report: {len(state.final_report)} chars")
+
     except Exception as e:
         state.errors.append(f"Unexpected error in research loop: {type(e).__name__}: {e}")
         state.record_failure(f"Unexpected error: {type(e).__name__}")
