@@ -14,24 +14,18 @@ Built entirely in raw Python. No LangChain. No LangGraph. No GPT-Researcher. Eve
 
 ## What This Covers
 
-**Core capabilities:**
-
 | Concept | How it works here |
 |---|---|
-| Planning | Planner decomposes question into targeted subqueries |
+| Planning | Planner decomposes the question into targeted subqueries |
 | Tools | search, fetch, extract, summarize — each a clean isolated module |
-| Input type | Unstructured HTML and web pages |
 | Context management | 50-100 pages compressed via cheap model + relevance filter |
 | Stopping condition | Reflector decides when coverage is sufficient |
-| Output | Multi-section report with inline citations |
-| Cost control | Hard cap — research runs are unbounded without it |
-
-**Production patterns (Phase 6):**
-- Job queue: decouple submission from execution
-- Checkpoint + resume: never lose work to a crash
-- Hard cost cap: ceiling on unbounded LLM spend
-- Timeout + graceful degradation: one slow URL never blocks everything
-- Streaming progress events: tell the user what's happening in real time
+| Output | Multi-section Markdown report with inline `[N]` citations + References section |
+| Cost control | Hard cap — cost checked before every round |
+| Observability | Span-based tracing for every pipeline step; saved to `logs/traces/` |
+| Guardrails | Input validation, SSRF-safe URL checks, citation bounds, query dedup |
+| Evaluations | Keyword recall, citation accuracy, citation density, composite score |
+| Web UI | Streamlit app — Ask tab, Dashboard tab, Traces tab |
 
 ---
 
@@ -41,47 +35,46 @@ Built entirely in raw Python. No LangChain. No LangGraph. No GPT-Researcher. Eve
 User Question
         │
         ▼
-┌──────────────────────────────────┐
-│  Planner                         │
-│  LLM decomposes into 3-5 queries │
-└──────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  Guardrails: validate_query()        │
+│  Reject empty / too short / too long │
+└──────────────────────────────────────┘
         │
         ▼
-┌────────────────────────────────────────────────────────┐
-│  Research Loop                                          │
-│                                                         │
-│  Round 1: asyncio.gather(                              │
-│    Researcher(subquery_1),  ← parallel                 │
-│    Researcher(subquery_2),  ← parallel                 │
-│    Researcher(subquery_3),  ← parallel                 │
-│  )                                                      │
-│                                                         │
-│  Each Researcher:                                       │
-│    tavily.search(query) → URLs + page content          │
-│    cheap_llm.summarize(page) → 200-word bullets        │
-│                                                         │
-│  Reflector: "What gaps remain? Follow-up query?"       │
-│    → gap found → Round 2 with new targeted query       │
-│    → no gap OR max rounds → stop                       │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  Planner                             │
+│  LLM decomposes into 3-5 subqueries  │
+│  deduplicate_queries() removes dupes │
+└──────────────────────────────────────┘
         │
         ▼
-┌──────────────────────────────────┐
-│  Context Filter                  │
-│  cosine_similarity(question,     │
-│    each summary) → top 20        │
-└──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Research Loop  (up to max_research_rounds)               │
+│                                                           │
+│  For each subquery:                                       │
+│    Researcher:                                            │
+│      tavily.search(query) → URLs + page content          │
+│      is_safe_url() check before every fetch              │
+│      cheap_llm.summarize(page) → 200-word bullets        │
+│      → PageSummary added to ResearchState                │
+│                                                           │
+│  Reflector: "What gaps remain? Follow-up query?"         │
+│    → gap found → next round with follow-up query         │
+│    → no gap OR max rounds → stop                         │
+└──────────────────────────────────────────────────────────┘
         │
         ▼
-┌──────────────────────────────────┐
-│  Synthesizer                     │
-│  Outline → section by section    │
-│  Inline citations [1][2]         │
-└──────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  Synthesizer (two-shot)              │
+│  Shot 1: outline (section headings)  │
+│  Shot 2: full report, [N] citations  │
+│  check_citation_bounds() validates   │
+│  References section auto-appended    │
+└──────────────────────────────────────┘
         │
         ▼
     ResearchState returned
-    (report, sources, cost_usd, rounds, status)
+    (final_report, sources, cost_usd, rounds, status, spans)
 ```
 
 ---
@@ -96,32 +89,52 @@ research-agent/
 │   ├── planner.py        # query decomposition — one question → N subqueries
 │   ├── researcher.py     # search + fetch + summarize for one subquery
 │   ├── reflector.py      # gap detection — should we search again?
-│   ├── synthesizer.py    # outline + section-by-section report generation
-│   └── loop.py           # orchestrates the full research pipeline
+│   ├── synthesizer.py    # two-shot outline → report with mandatory citations
+│   ├── guardrails.py     # validate_query, is_safe_url, check_citation_bounds, dedup
+│   └── loop.py           # orchestrates the full pipeline; never raises
+│
+├── prompts/
+│   ├── planner.py        # DECOMPOSE_PROMPT
+│   ├── reflector.py      # REFLECT_PROMPT
+│   └── synthesizer.py    # OUTLINE_PROMPT, REPORT_PROMPT
 │
 ├── tools/
 │   ├── search.py         # Tavily API wrapper → list[SearchResult]
-│   ├── fetch.py          # Jina Reader + trafilatura → FetchResult
+│   ├── fetch.py          # Jina Reader + trafilatura → FetchResult (SSRF-safe)
 │   └── extract.py        # HTML → clean text, truncation helpers
 │
 ├── llm/
-│   └── client.py         # Azure Foundry wrapper: generate, generate_cheap, embed
+│   └── client.py         # Azure AI Foundry wrapper: generate, generate_cheap, embed
+│                         # tracks token usage + cost per call
 │
 ├── observability/
-│   └── tracer.py         # Span + Trace structured logging (from SQL Agent)
+│   ├── tracer.py         # Span + Trace dataclasses; context-manager instrumentation
+│   └── dashboard.py      # load_traces, summary_stats, latency_stats, cost_stats
 │
 ├── evals/
-│   ├── dataset/
-│   │   └── golden.jsonl  # 20 research questions with expected topics
-│   ├── runner.py         # runs evals against real LLM
-│   └── metrics.py        # coverage metric, source quality metric
+│   ├── dataset.py        # 5 eval questions with ground-truth keywords
+│   ├── metrics.py        # citation_accuracy, citation_density, keyword_coverage,
+│   │                     # source_quality, run_score (composite)
+│   └── runner.py         # CLI runner — coloured output, summary table, JSON export
 │
 ├── tests/
-│   ├── unit/             # pure logic tests, no API calls
-│   └── integration/      # end-to-end tests with real APIs
+│   ├── unit/             # 314 tests, no API calls required
+│   │   ├── test_state.py
+│   │   ├── test_planner.py
+│   │   ├── test_reflector.py
+│   │   ├── test_researcher.py
+│   │   ├── test_loop.py
+│   │   ├── test_guardrails.py
+│   │   ├── test_synthesizer.py
+│   │   ├── test_tracer.py
+│   │   ├── test_dashboard.py
+│   │   ├── test_fetch.py
+│   │   ├── test_search.py
+│   │   └── test_extract.py
+│   └── integration/      # end-to-end tests (needs real API keys)
 │
+├── app.py                # Streamlit UI — Ask, Dashboard, Traces tabs
 ├── config.py             # pydantic-settings — all env vars typed + validated
-├── app.py                # Streamlit UI (Phase 5)
 ├── pyproject.toml
 └── .env.example
 ```
@@ -137,11 +150,11 @@ research-agent/
 - Tavily API key (free at [app.tavily.com](https://app.tavily.com))
 
 ### Models needed in Azure Foundry
-| Role | Model | Used for |
-|---|---|---|
-| Smart | `gpt-5.2-chat` | Planning, reflection, synthesis |
-| Cheap | `gpt-4o-mini` | Per-page summarization (50-100x per run) |
-| Embeddings | `text-embedding-3-small` | Context relevance filtering |
+| Role | Used for |
+|---|---|
+| Smart (e.g. `gpt-4o`) | Planning, reflection, synthesis |
+| Cheap (e.g. `gpt-4o-mini`) | Per-page summarization (50-100x per run) |
+| Embeddings (e.g. `text-embedding-3-small`) | Context relevance filtering |
 
 ### Install
 
@@ -154,19 +167,47 @@ uv sync
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
+# Edit .env with your Azure AI Foundry and Tavily credentials
 ```
 
 ### Run unit tests (no API keys needed)
 
 ```bash
 uv run pytest tests/unit/ -v
+# 314 passed
 ```
 
-### Run integration test (needs real API keys)
+### Run the Streamlit UI
 
 ```bash
-uv run python tests/integration/test_phase1_tools.py
+uv run streamlit run app.py
+# Opens at http://localhost:8501
+```
+
+### Run from Python
+
+```python
+from agent.loop import run_research
+
+state = run_research(
+    "What are the major breakthroughs in solid-state battery technology in 2024?",
+    on_progress=print,   # stream progress to stdout
+)
+print(state.final_report)
+print(f"Sources: {len(state.sources)}  Cost: ${state.estimated_cost_usd:.4f}")
+```
+
+### Run evaluations (needs API keys)
+
+```bash
+# Run all 5 eval questions
+uv run python -m evals.runner
+
+# Run one question by category
+uv run python -m evals.runner --category science
+
+# Save results to JSON
+uv run python -m evals.runner --output results.json
 ```
 
 ---
@@ -175,12 +216,13 @@ uv run python tests/integration/test_phase1_tools.py
 
 | Phase | Status | What it builds |
 |---|---|---|
-| 1 — Foundation | ✅ Complete | Search, fetch, extract tools |
-| 2 — Research Loop | 🔲 | Planner, researcher, reflector, ResearchState |
-| 3 — Synthesis + Report | 🔲 | Section-by-section report, citations |
-| 4 — Evals + Observability | 🔲 | Coverage metrics, cost tracking, traces |
-| 5 — Parallel Fetching + UI | 🔲 | asyncio fan-out, Streamlit |
-| 6 — Production Ready | 🔲 | Job queue, checkpoints, cost cap, streaming |
+| 1 — Foundation | ✅ Complete | Search, fetch, extract tools + integration tests |
+| 2 — Research Loop | ✅ Complete | Planner, researcher, reflector, ResearchState, prompts folder |
+| 3 — Synthesizer | ✅ Complete | Two-shot outline → report, mandatory `[N]` citations, References section |
+| 4 — Observability | ✅ Complete | Span-based tracer, dashboard metrics, cost tracking in LLMClient |
+| 5 — Streamlit UI | ✅ Complete | Ask + Dashboard + Traces tabs, live progress via `on_progress` callback |
+| Pre-6 Audit | ✅ Complete | Guardrails at every layer, 314 unit tests, eval framework |
+| 6 — Production Ready | 🔲 Planned | Parallel fetching, checkpoint + resume, streaming, job queue |
 
 ---
 
@@ -188,14 +230,14 @@ uv run python tests/integration/test_phase1_tools.py
 
 | Layer | Tool |
 |---|---|
-| LLM | GPT-5.2 + GPT-4o-mini via Microsoft Azure AI Foundry |
+| LLM | GPT-4o + GPT-4o-mini via Microsoft Azure AI Foundry |
 | Search | Tavily API |
 | URL fetching | Jina Reader + trafilatura |
 | Agent framework | Raw Python — no LangChain, no LangGraph |
 | Config | `pydantic-settings` v2 |
-| Web UI | Streamlit (Phase 5) |
+| Web UI | Streamlit |
 | Package manager | `uv` |
-| Tests | `pytest` |
+| Tests | `pytest` (314 unit tests) |
 
 ---
 
