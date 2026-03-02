@@ -63,6 +63,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from config import settings
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # ── Result type ────────────────────────────────────────────────────────────────
@@ -153,22 +156,9 @@ def search(
     }
 
     try:
-        response = httpx.post(
-            "https://api.tavily.com/search",
-            json=payload,
-            timeout=30.0,  # search itself has a generous timeout
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    except httpx.TimeoutException:
-        print(f"[search] Tavily timeout for query: {query!r}")
-        return []
-    except httpx.HTTPStatusError as e:
-        print(f"[search] Tavily HTTP {e.response.status_code} for query: {query!r}")
-        return []
-    except Exception as e:
-        print(f"[search] Unexpected error ({type(e).__name__}) for query: {query!r}")
+        data = _tavily_request(payload, query)
+    except Exception:
+        # _tavily_request logs all failures; return empty on final failure
         return []
 
     results = []
@@ -185,3 +175,43 @@ def search(
     # Tavily returns results sorted by score already, but be explicit
     results.sort(key=lambda r: r.score, reverse=True)
     return results
+
+
+# ── Retry-wrapped Tavily call ────────────────────────────────────────────────
+
+from tools.retry import retry_with_backoff
+
+
+@retry_with_backoff(
+    max_retries=settings.max_fetch_retries,
+    base_delay=1.0,
+    retryable_exceptions=(httpx.TimeoutException,),
+)
+def _tavily_post(payload: dict) -> httpx.Response:
+    """Retry-wrapped POST to Tavily. Only retries on timeout, not on 4xx/5xx."""
+    return httpx.post(
+        "https://api.tavily.com/search",
+        json=payload,
+        timeout=30.0,
+    )
+
+
+def _tavily_request(payload: dict, query: str) -> dict:
+    """
+    Make the Tavily API call with retry on transient failures.
+
+    Retries on timeouts. Raises on final failure so search() can catch and return [].
+    """
+    try:
+        response = _tavily_post(payload)
+        response.raise_for_status()
+        return response.json()
+    except httpx.TimeoutException:
+        logger.warning("Tavily timeout (all retries exhausted) for query: %r", query)
+        raise
+    except httpx.HTTPStatusError as e:
+        logger.warning("Tavily HTTP %d for query: %r", e.response.status_code, query)
+        raise
+    except Exception as e:
+        logger.warning("Tavily unexpected error (%s) for query: %r", type(e).__name__, query)
+        raise

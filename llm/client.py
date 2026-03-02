@@ -52,6 +52,9 @@ from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 
 from config import settings
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class LLMClient:
@@ -205,8 +208,8 @@ class LLMClient:
             self._total_input_tokens += inp
             self._total_output_tokens += out
             self._total_cost_usd += cost
-        except Exception:
-            pass  # never let tracking break the main flow
+        except Exception as e:
+            logger.warning("Token tracking failed (cost cap may be inaccurate): %s", e)
 
     def update_state_cost(self, state) -> None:
         """

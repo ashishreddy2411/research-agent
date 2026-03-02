@@ -1,8 +1,9 @@
 """
 tests/unit/test_planner.py — Unit tests for agent/planner.py
 
-Covers: decompose(), plan(), _parse_queries(), _extract_text(), fallback behavior,
+Covers: decompose(), plan(), _parse_queries(), fallback behavior,
         deduplication via guardrails.
+Note: _extract_text was moved to llm/utils.py and is tested in test_llm_utils.py.
 """
 
 import sys
@@ -12,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pytest
 from unittest.mock import MagicMock, patch
-from agent.planner import Planner, _parse_queries, _extract_text
+from agent.planner import Planner, _parse_queries
+from llm.utils import extract_response_text
 from agent.state import ResearchState
 
 
@@ -66,30 +68,21 @@ class TestParseQueries:
         assert "real query" in result
 
 
-# ── _extract_text ─────────────────────────────────────────────────────────────
+# ── extract_response_text (shared util, moved from _extract_text) ─────────────
+# Full coverage in tests/unit/test_llm_utils.py — smoke tests here to confirm
+# planner correctly calls through to the shared util.
 
-class TestExtractText:
+class TestExtractResponseText:
     def test_output_text_attribute(self):
         response = MagicMock()
         response.output_text = "  Hello World  "
-        assert _extract_text(response) == "Hello World"
-
-    def test_falls_back_to_output_items(self):
-        response = MagicMock()
-        response.output_text = None
-        block = MagicMock()
-        block.text = "block text"
-        item = MagicMock()
-        item.type = "message"
-        item.content = [block]
-        response.output = [item]
-        assert _extract_text(response) == "block text"
+        assert extract_response_text(response) == "Hello World"
 
     def test_returns_empty_on_exception(self):
         response = MagicMock()
         response.output_text = None
-        response.output = None  # will cause AttributeError
-        assert _extract_text(response) == ""
+        response.output = None
+        assert extract_response_text(response) == ""
 
 
 # ── Planner.decompose() ───────────────────────────────────────────────────────

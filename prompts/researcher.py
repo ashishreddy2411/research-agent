@@ -12,7 +12,14 @@ Page content:
 {content}
 
 Extract ALL facts from this page that are relevant to the research query above.
-Write bullet points only. Each bullet = one discrete fact.
-Be specific: include numbers, dates, names, percentages where present.
-Ignore content unrelated to the query.
+
+Rules:
+- Write bullet points only. Each bullet = one discrete fact.
+- Be THOROUGH — capture every relevant detail, not just the headline finding.
+- Include specific data: numbers, dates, names, percentages, comparisons.
+- Capture context, methodology, and caveats — not just conclusions.
+- Include relationships between facts (causes, effects, comparisons).
+- Note any limitations, criticisms, or counterpoints mentioned.
+- Ignore content unrelated to the query.
+
 Maximum {max_words} words total."""

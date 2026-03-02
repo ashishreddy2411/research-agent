@@ -37,10 +37,13 @@ import json
 import re
 
 from llm.client import LLMClient
+from llm.utils import extract_response_text
 from agent.state import ResearchState
 from agent.guardrails import deduplicate_queries
 from prompts.planner import DECOMPOSE_PROMPT
+from observability.logging import get_logger
 
+logger = get_logger(__name__)
 
 # ── Prompt lives in prompts/planner.py ───────────────────────────────────────
 
@@ -80,14 +83,14 @@ class Planner:
             response = self._client.generate(
                 input=[{"role": "user", "content": prompt}],
             )
-            text = _extract_text(response)
+            text = extract_response_text(response)
             queries = _parse_queries(text)
 
             if queries:
                 return deduplicate_queries(queries)
 
-        except Exception:
-            pass  # fall through to fallback
+        except Exception as e:
+            logger.warning("Planner LLM call failed, using original query as fallback: %s", e)
 
         return [query]
 
@@ -100,21 +103,6 @@ class Planner:
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
-
-def _extract_text(response) -> str:
-    """Pull text from a Responses API response object."""
-    try:
-        if hasattr(response, "output_text") and response.output_text:
-            return response.output_text.strip()
-        for item in response.output:
-            if item.type == "message":
-                for block in item.content:
-                    if hasattr(block, "text"):
-                        return block.text.strip()
-    except Exception:
-        pass
-    return ""
-
 
 def _parse_queries(text: str) -> list[str]:
     """

@@ -137,11 +137,11 @@ class Settings(BaseSettings):
         description="Hard cap on total URLs processed across all rounds",
     )
     max_summary_tokens: int = Field(
-        default=300,
+        default=500,
         description="Token cap on each page summary (cheap model output limit)",
     )
     top_k_summaries: int = Field(
-        default=20,
+        default=30,
         description="How many summaries pass the relevance filter into synthesis",
     )
 
