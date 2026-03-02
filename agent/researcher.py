@@ -48,6 +48,9 @@ from agent.state import PageSummary, ResearchState
 from llm.client import LLMClient
 from config import settings
 from prompts.researcher import SUMMARIZE_PROMPT
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # ── Prompt lives in prompts/researcher.py ────────────────────────────────────
@@ -170,7 +173,8 @@ class Researcher:
 
         try:
             summary_text = self._client.generate_cheap(prompt)
-        except Exception:
+        except Exception as e:
+            logger.warning("Summarization failed for %s: %s", result.url, e)
             return None
 
         if not summary_text or len(summary_text.strip()) < 20:

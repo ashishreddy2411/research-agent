@@ -43,8 +43,11 @@ from agent.reflector import Reflector
 from agent.synthesizer import Synthesizer
 from agent.guardrails import validate_query
 from observability.tracer import Tracer
+from observability.logging import get_logger
 from llm.client import LLMClient
 from config import settings
+
+logger = get_logger(__name__)
 
 
 def run_research(
@@ -74,7 +77,7 @@ def run_research(
     tracer = Tracer(query=query)
 
     def _progress(msg: str) -> None:
-        _log(msg)
+        logger.info(msg)
         if on_progress:
             on_progress(msg)
 
@@ -105,7 +108,7 @@ def run_research(
         client.update_state_cost(state)
         tracer.finish(state)
         path = tracer.save()
-        _log(f"Trace saved → {path}")
+        logger.info("Trace saved → %s", path)
 
     return state
 
@@ -137,6 +140,7 @@ def _run_loop(
 
         progress(f"Round {round_num} of {settings.max_research_rounds}")
 
+        source_cap_hit = False
         for subquery in current_queries:
             # Cost cap check — always use live cost from client
             client.update_state_cost(state)
@@ -154,6 +158,7 @@ def _run_loop(
             # Source cap check
             if state.total_sources >= settings.max_sources_per_run:
                 progress(f"Source cap {settings.max_sources_per_run} reached")
+                source_cap_hit = True
                 break
 
             progress(f"Searching: {subquery[:70]}...")
@@ -167,6 +172,11 @@ def _run_loop(
             progress(f"Found {new_count} new sources — {state.total_sources} total")
 
         state.rounds_completed = round_num
+
+        # If source cap was hit, skip reflector and stop the loop
+        if source_cap_hit:
+            progress("Source cap hit — moving to synthesis")
+            break
 
         # ── Step 3: Reflect ────────────────────────────────────────────────────
         if round_num >= settings.max_research_rounds:
@@ -190,13 +200,9 @@ def _run_loop(
         progress(f"Gap found: {follow_up[:70]}...")
         current_queries = [follow_up] if follow_up else state.subqueries[:1]
 
-    _log(
-        f"Research complete. "
-        f"Rounds: {state.rounds_completed}, "
-        f"Sources: {state.total_sources}, "
-        f"Cost: ${state.estimated_cost_usd:.4f}"
+    logger.info(
+        "Research complete. Rounds: %d, Sources: %d, Cost: $%.4f",
+        state.rounds_completed,
+        state.total_sources,
+        state.estimated_cost_usd,
     )
-
-
-def _log(message: str) -> None:
-    print(f"[research-loop] {message}")

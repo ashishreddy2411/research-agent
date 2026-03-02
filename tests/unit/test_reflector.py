@@ -17,7 +17,6 @@ from agent.reflector import (
     ReflectionResult,
     _parse_reflection,
     _format_summaries,
-    _extract_text,
 )
 from agent.state import ResearchState, PageSummary
 
@@ -123,17 +122,17 @@ class TestFormatSummaries:
         assert "[1]" in result
         assert "[3]" in result
 
-    def test_caps_at_30(self):
+    def test_caps_at_40(self):
         summaries = [make_summary(i) for i in range(50)]
         result = _format_summaries(summaries)
-        assert "[30]" in result
-        assert "[31]" not in result
+        assert "[40]" in result
+        assert "[41]" not in result
 
-    def test_truncates_summary_at_500(self):
+    def test_truncates_summary_at_700(self):
         s = make_summary(1)
-        s.summary = "x" * 600
+        s.summary = "x" * 800
         result = _format_summaries([s])
-        assert "x" * 501 not in result
+        assert "x" * 701 not in result
 
     def test_empty_list(self):
         result = _format_summaries([])

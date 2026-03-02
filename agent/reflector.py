@@ -56,7 +56,11 @@ from dataclasses import dataclass
 
 from agent.state import PageSummary, ResearchState
 from llm.client import LLMClient
+from llm.utils import extract_response_text
 from prompts.reflector import REFLECT_PROMPT
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # ── Result type ───────────────────────────────────────────────────────────────
@@ -129,11 +133,11 @@ class Reflector:
             response = self._client.generate(
                 input=[{"role": "user", "content": prompt}],
             )
-            text = _extract_text(response)
+            text = extract_response_text(response)
             return _parse_reflection(text)
 
-        except Exception:
-            # On failure: stop the loop, don't keep searching
+        except Exception as e:
+            logger.warning("Reflector LLM call failed, stopping loop: %s", e)
             return ReflectionResult(
                 has_gap=False,
                 follow_up_query=None,
@@ -166,29 +170,14 @@ def _format_summaries(summaries: list[PageSummary]) -> str:
     Each summary shown as: [Round N] Title (URL)\n{summary text}
     Capped at 30 summaries to prevent prompt overflow.
     """
-    shown = summaries[:30]
+    shown = summaries[:40]
     lines = []
     for i, s in enumerate(shown, 1):
         title = s.title or s.url
         lines.append(f"[{i}] Round {s.round_number} — {title}")
-        lines.append(s.summary[:500])  # cap each summary at 500 chars
+        lines.append(s.summary[:700])
         lines.append("")
     return "\n".join(lines)
-
-
-def _extract_text(response) -> str:
-    """Pull text from a Responses API response object."""
-    try:
-        if hasattr(response, "output_text") and response.output_text:
-            return response.output_text.strip()
-        for item in response.output:
-            if item.type == "message":
-                for block in item.content:
-                    if hasattr(block, "text"):
-                        return block.text.strip()
-    except Exception:
-        pass
-    return ""
 
 
 def _parse_reflection(text: str) -> ReflectionResult:

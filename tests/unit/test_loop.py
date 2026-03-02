@@ -204,6 +204,18 @@ class TestStoppingConditions:
         from config import settings
         assert state.rounds_completed <= settings.max_research_rounds
 
+    def test_source_cap_breaks_both_loops(self):
+        """When source cap is hit, the outer round loop should also stop."""
+        from config import settings
+        # Create a run where researcher adds many sources per subquery
+        state = patched_run(
+            "What are the latest battery breakthroughs in 2025?",
+            reflector_has_gap=True,  # would continue if not capped
+            researcher_count=settings.max_sources_per_run + 10,  # exceed cap in round 1
+        )
+        # Should have stopped after round 1 due to source cap
+        assert state.rounds_completed == 1
+
 
 # ── Failure handling ──────────────────────────────────────────────────────────
 

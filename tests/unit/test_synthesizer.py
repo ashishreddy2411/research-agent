@@ -23,6 +23,8 @@ from agent.synthesizer import (
     _fallback_report,
     _format_summaries_for_prompt,
     _format_sources_for_prompt,
+    _rank_by_relevance,
+    _cosine_similarity,
 )
 from agent.state import ResearchState, ResearchStatus, PageSummary
 
@@ -56,6 +58,9 @@ def mock_client_with(outline_json: str, report_text: str) -> MagicMock:
     response2 = MagicMock()
     response2.output_text = report_text
     client.generate.side_effect = [response1, response2]
+    # Mock embed() to return identity-like vectors (embedding ranking)
+    # Returns list of zero-vectors so cosine sim falls back gracefully
+    client.embed.return_value = [[0.1] * 10 for _ in range(100)]
     return client
 
 
@@ -159,12 +164,12 @@ class TestFormatHelpers:
         result = _format_summaries_for_prompt([s])
         assert "My Title" in result
 
-    def test_format_summaries_truncates_at_300(self):
+    def test_format_summaries_truncates_at_600(self):
         s = make_summary(1)
-        s.summary = "x" * 500
+        s.summary = "x" * 800
         result = _format_summaries_for_prompt([s])
-        # 300 chars of summary shown, not 500
-        assert "x" * 301 not in result
+        # 600 chars of summary shown, not 800
+        assert "x" * 601 not in result
 
     def test_format_sources_includes_url(self):
         s = make_summary(1, url="https://mysite.com/article")
@@ -294,9 +299,79 @@ class TestSynthesizerSynthesize:
         report_text = "## A\nFact [1]."
         client = mock_client_with(outline_json, report_text)
 
+        # _rank_by_relevance uses client.embed(), which is mocked to return
+        # same-ish vectors. The test just checks that capping works.
         with patch("agent.synthesizer.settings") as mock_settings:
             mock_settings.top_k_summaries = 10
             Synthesizer(client=client).synthesize(state)
 
         # sources should be capped at 10
         assert len(state.sources) == 10
+
+
+# ── Cosine similarity ────────────────────────────────────────────────────────
+
+class TestCosineSimilarity:
+    def test_identical_vectors(self):
+        v = [1.0, 2.0, 3.0]
+        assert abs(_cosine_similarity(v, v) - 1.0) < 0.001
+
+    def test_orthogonal_vectors(self):
+        a = [1.0, 0.0, 0.0]
+        b = [0.0, 1.0, 0.0]
+        assert abs(_cosine_similarity(a, b)) < 0.001
+
+    def test_opposite_vectors(self):
+        a = [1.0, 0.0]
+        b = [-1.0, 0.0]
+        assert abs(_cosine_similarity(a, b) + 1.0) < 0.001
+
+    def test_zero_vector_returns_zero(self):
+        a = [0.0, 0.0]
+        b = [1.0, 2.0]
+        assert _cosine_similarity(a, b) == 0.0
+
+
+# ── _rank_by_relevance ───────────────────────────────────────────────────────
+
+class TestRankByRelevance:
+    def test_fewer_than_top_k_returns_all(self):
+        """If we have fewer summaries than top_k, return all."""
+        summaries = [make_summary(i) for i in range(3)]
+        client = MagicMock()
+        result = _rank_by_relevance("query", summaries, client, top_k=10)
+        assert len(result) == 3
+
+    def test_returns_top_k_on_success(self):
+        """Returns exactly top_k when embedding works."""
+        summaries = [make_summary(i) for i in range(10)]
+        client = MagicMock()
+        # Return distinct vectors so ranking is deterministic
+        # Query vector similar to summary 5 and 7
+        vectors = [[0.5, 0.5]]  # query
+        for i in range(10):
+            vectors.append([float(i) / 10, 1.0 - float(i) / 10])
+        client.embed.return_value = vectors
+
+        result = _rank_by_relevance("query", summaries, client, top_k=3)
+        assert len(result) == 3
+
+    def test_fallback_on_embed_failure(self):
+        """Returns first-N on embedding failure."""
+        summaries = [make_summary(i) for i in range(10)]
+        client = MagicMock()
+        client.embed.side_effect = RuntimeError("embedding unavailable")
+
+        result = _rank_by_relevance("query", summaries, client, top_k=5)
+        assert len(result) == 5
+        # Should be first 5 (fallback)
+        assert result == summaries[:5]
+
+    def test_fallback_on_bad_embed_shape(self):
+        """Returns first-N when embed returns wrong shape."""
+        summaries = [make_summary(i) for i in range(10)]
+        client = MagicMock()
+        client.embed.return_value = []  # empty — bad shape
+
+        result = _rank_by_relevance("query", summaries, client, top_k=5)
+        assert len(result) == 5

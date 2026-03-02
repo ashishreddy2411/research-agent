@@ -41,13 +41,18 @@ USAGE:
 """
 
 import json
+import math
 import re
 
-from agent.state import ResearchState, ResearchStatus
+from agent.state import ResearchState, ResearchStatus, PageSummary
 from agent.guardrails import check_citation_bounds
 from llm.client import LLMClient
+from llm.utils import extract_response_text
 from config import settings
 from prompts.synthesizer import OUTLINE_PROMPT, REPORT_PROMPT
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class Synthesizer:
@@ -82,7 +87,14 @@ class Synthesizer:
             )
             return
 
-        summaries = state.page_summaries[: settings.top_k_summaries]
+        # Select best summaries by semantic relevance (embedding cosine similarity)
+        # Falls back to first-N if embedding fails
+        summaries = _rank_by_relevance(
+            state.query,
+            state.page_summaries,
+            self._client,
+            settings.top_k_summaries,
+        )
         sources = [s.url for s in summaries]
 
         # Shot 1: outline
@@ -131,12 +143,12 @@ class Synthesizer:
             response = self._client.generate(
                 input=[{"role": "user", "content": prompt}],
             )
-            text = _extract_text(response)
+            text = extract_response_text(response)
             sections = _parse_outline(text)
             if sections:
                 return sections
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Outline generation failed, using fallback: %s", e)
 
         return [f"Research Findings: {query}"]
 
@@ -164,11 +176,11 @@ class Synthesizer:
             response = self._client.generate(
                 input=[{"role": "user", "content": prompt}],
             )
-            text = _extract_text(response)
+            text = extract_response_text(response)
             if text and len(text.strip()) > 100:
                 return text
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Report generation failed, using fallback: %s", e)
 
         # Fallback: bullet list of summaries
         return _fallback_report(query, summaries)
@@ -176,16 +188,79 @@ class Synthesizer:
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+def _rank_by_relevance(
+    query: str,
+    summaries: list[PageSummary],
+    client: LLMClient,
+    top_k: int,
+) -> list[PageSummary]:
+    """
+    Rank summaries by semantic relevance to the query using embeddings.
+
+    Embeds the query and all summary texts, computes cosine similarity,
+    returns the top-k most relevant summaries.
+
+    Falls back to first-N on any failure — never breaks synthesis.
+    """
+    if len(summaries) <= top_k:
+        return summaries
+
+    try:
+        # Batch embed: query + all summary texts in one API call
+        texts = [query] + [s.summary for s in summaries]
+        vectors = client.embed(texts)
+
+        if not isinstance(vectors, list) or len(vectors) < 2:
+            logger.warning("Embedding returned unexpected shape, using first-N fallback")
+            return summaries[:top_k]
+
+        query_vec = vectors[0]
+        summary_vecs = vectors[1:]
+
+        # Compute cosine similarity for each summary
+        scored = []
+        for i, s_vec in enumerate(summary_vecs):
+            sim = _cosine_similarity(query_vec, s_vec)
+            scored.append((sim, i, summaries[i]))
+
+        # Sort by similarity descending, take top-k
+        scored.sort(key=lambda x: x[0], reverse=True)
+        ranked = [item[2] for item in scored[:top_k]]
+
+        logger.info(
+            "Embedding ranking: %d summaries → top %d (sim range: %.3f–%.3f)",
+            len(summaries),
+            len(ranked),
+            scored[-1][0] if scored else 0,
+            scored[0][0] if scored else 0,
+        )
+        return ranked
+
+    except Exception as e:
+        logger.warning("Embedding ranking failed, using first-N fallback: %s", e)
+        return summaries[:top_k]
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 def _format_summaries_for_prompt(summaries: list) -> str:
     """
     Format summaries for the outline prompt.
-    Shows title + first 300 chars of summary per source.
+    Shows title + first 600 chars of summary per source.
     """
     lines = []
     for i, s in enumerate(summaries, 1):
         title = s.title or s.url
         lines.append(f"[{i}] {title}")
-        lines.append(s.summary[:300])
+        lines.append(s.summary[:600])
         lines.append("")
     return "\n".join(lines)
 
@@ -199,7 +274,7 @@ def _format_sources_for_prompt(summaries: list) -> str:
     for i, s in enumerate(summaries, 1):
         title = s.title or s.url
         lines.append(f"[{i}] {title} ({s.url})")
-        lines.append(s.summary[:500])
+        lines.append(s.summary[:800])
         lines.append("")
     return "\n".join(lines)
 
@@ -235,21 +310,6 @@ def _fallback_report(query: str, summaries: list) -> str:
         lines.append(s.summary)
         lines.append("")
     return "\n".join(lines)
-
-
-def _extract_text(response) -> str:
-    """Pull text from a Responses API response object."""
-    try:
-        if hasattr(response, "output_text") and response.output_text:
-            return response.output_text.strip()
-        for item in response.output:
-            if item.type == "message":
-                for block in item.content:
-                    if hasattr(block, "text"):
-                        return block.text.strip()
-    except Exception:
-        pass
-    return ""
 
 
 def _parse_outline(text: str) -> list[str]:

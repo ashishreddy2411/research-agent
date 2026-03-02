@@ -69,6 +69,10 @@ from datetime import datetime, timezone
 
 from config import settings
 from agent.guardrails import is_safe_url
+from tools.retry import retry_with_backoff
+from observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # ── Result type ────────────────────────────────────────────────────────────────
@@ -139,22 +143,13 @@ def _fetch_via_jina(url: str) -> FetchResult:
     strips boilerplate, and returns clean Markdown. One HTTP GET.
 
     Rate limit: ~20 requests/minute on the free tier.
-    If rate-limited (429), we fall through to trafilatura.
+    If rate-limited (429), we fall through to trafilatura (no retry on 429).
+    Retries on timeouts with exponential backoff.
     """
     jina_url = f"https://r.jina.ai/{url}"
 
     try:
-        response = httpx.get(
-            jina_url,
-            timeout=settings.fetch_timeout_seconds,
-            headers={
-                # Tell Jina we want plain text output (not HTML)
-                "Accept": "text/plain",
-                # User-Agent so Jina knows this is a legitimate research tool
-                "X-No-Cache": "false",  # allow Jina to use its cache (faster)
-            },
-            follow_redirects=True,
-        )
+        response = _jina_get(jina_url)
 
         if response.status_code == 429:
             return _failed(url, "Jina rate limit (429) — falling back to trafilatura")
@@ -164,11 +159,9 @@ def _fetch_via_jina(url: str) -> FetchResult:
 
         content = response.text.strip()
 
-        # If Jina returned very little content, it likely hit a paywall or error page
         if len(content) < 200:
             return _failed(url, f"Jina returned too little content ({len(content)} chars)")
 
-        # Extract title from first Markdown heading if present
         title = _extract_title_from_markdown(content)
 
         return FetchResult(
@@ -181,9 +174,27 @@ def _fetch_via_jina(url: str) -> FetchResult:
         )
 
     except httpx.TimeoutException:
-        return _failed(url, f"Jina timeout after {settings.fetch_timeout_seconds}s")
+        return _failed(url, f"Jina timeout after {settings.fetch_timeout_seconds}s (retries exhausted)")
     except Exception as e:
         return _failed(url, f"Jina error: {type(e).__name__}: {e}")
+
+
+@retry_with_backoff(
+    max_retries=settings.max_fetch_retries,
+    base_delay=1.0,
+    retryable_exceptions=(httpx.TimeoutException,),
+)
+def _jina_get(jina_url: str):
+    """Retry-wrapped HTTP GET for Jina Reader."""
+    return httpx.get(
+        jina_url,
+        timeout=settings.fetch_timeout_seconds,
+        headers={
+            "Accept": "text/plain",
+            "X-No-Cache": "false",
+        },
+        follow_redirects=True,
+    )
 
 
 # ── Tier 2: trafilatura ────────────────────────────────────────────────────────
@@ -192,26 +203,15 @@ def _fetch_via_trafilatura(url: str) -> FetchResult:
     """
     Fetch via httpx + trafilatura extraction.
 
-    Fetches raw HTML with httpx, then uses trafilatura to strip navigation,
-    ads, headers, footers — keeping only the main article content.
+    Fetches raw HTML with httpx (with retry on timeouts), then uses
+    trafilatura to strip navigation, ads, headers, footers.
 
     Does NOT handle JavaScript-rendered content. If the page requires JS
     to render its main content, trafilatura will return empty or near-empty.
     In that case, we return success=False and the URL is skipped.
     """
     try:
-        # Step 1: fetch raw HTML
-        response = httpx.get(
-            url,
-            timeout=settings.fetch_timeout_seconds,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; ResearchAgent/1.0; "
-                    "+https://github.com/research-agent)"
-                )
-            },
-            follow_redirects=True,
-        )
+        response = _trafilatura_get(url)
 
         if response.status_code != 200:
             return _failed(url, f"HTTP {response.status_code}")
@@ -219,7 +219,7 @@ def _fetch_via_trafilatura(url: str) -> FetchResult:
         html = response.text
 
     except httpx.TimeoutException:
-        return _failed(url, f"Fetch timeout after {settings.fetch_timeout_seconds}s")
+        return _failed(url, f"Fetch timeout after {settings.fetch_timeout_seconds}s (retries exhausted)")
     except Exception as e:
         return _failed(url, f"Fetch error: {type(e).__name__}: {e}")
 
@@ -252,6 +252,26 @@ def _fetch_via_trafilatura(url: str) -> FetchResult:
 
     except Exception as e:
         return _failed(url, f"trafilatura error: {type(e).__name__}: {e}")
+
+
+@retry_with_backoff(
+    max_retries=settings.max_fetch_retries,
+    base_delay=1.0,
+    retryable_exceptions=(httpx.TimeoutException,),
+)
+def _trafilatura_get(url: str):
+    """Retry-wrapped HTTP GET for trafilatura fetch path."""
+    return httpx.get(
+        url,
+        timeout=settings.fetch_timeout_seconds,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; ResearchAgent/1.0; "
+                "+https://github.com/research-agent)"
+            )
+        },
+        follow_redirects=True,
+    )
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
